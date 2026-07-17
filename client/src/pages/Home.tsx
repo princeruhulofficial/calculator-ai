@@ -22,8 +22,20 @@ const DEMO_RESULT = {
 
 const EXAMPLES = ["15% of 8,750?","Solve x² - 5x + 6 = 0","$10k at 7% for 5 years","Circle area radius 12cm","98.6°F to Celsius","12 factorial"];
 
+const OPENROUTER_MODELS = [
+  { id: "openrouter/free", name: "Free Router (auto)" },
+  { id: "meta-llama/llama-3.3-70b-instruct:free", name: "Llama 3.3 70B (free)" },
+  { id: "qwen/qwen3-32b:free", name: "Qwen3 32B (free)" },
+  { id: "nvidia/nemotron-3-super-120b-a12b:free", name: "Nemotron Super (free)" },
+  { id: "google/gemma-3-27b-it:free", name: "Gemma 3 27B (free)" },
+];
+
+type Provider = "anthropic" | "openrouter";
+
 export default function Home() {
   const [mode, setMode] = useState<"demo" | "real" | null>(null);
+  const [provider, setProvider] = useState<Provider>("openrouter");
+  const [selectedModel, setSelectedModel] = useState(OPENROUTER_MODELS[0].id);
   const [keyInput, setKeyInput] = useState("");
   const [showKey, setShowKey] = useState(false);
   const [saved, setSaved] = useState(false);
@@ -39,46 +51,113 @@ export default function Home() {
   const isDemo = mode === "demo";
 
   const handleSave = () => {
-    if (isDemo) { setSaved(true); setSetupErr(""); return; }
+    if (isDemo) {
+      setSaved(true);
+      setSetupErr("");
+      return;
+    }
     const t = keyInput.trim();
-    if (!t.startsWith("sk-")) { setSetupErr("Invalid key — must start with 'sk-'"); return; }
-    setApiKey(t); setSaved(true); setSetupErr("");
+    if (provider === "anthropic" && !t.startsWith("sk-ant-")) {
+      setSetupErr("Anthropic key must start with 'sk-ant-'");
+      return;
+    }
+    if (provider === "openrouter" && !t.startsWith("sk-or-")) {
+      setSetupErr("OpenRouter key must start with 'sk-or-'");
+      return;
+    }
+    setApiKey(t);
+    setSaved(true);
+    setSetupErr("");
+  };
+
+  const callAnthropic = async (prompt: string) => {
+    const res = await fetch("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "x-api-key": apiKey,
+        "anthropic-version": "2023-06-01",
+        "anthropic-dangerous-direct-browser-access": "true",
+      },
+      body: JSON.stringify({
+        model: "claude-sonnet-4-20250514",
+        max_tokens: 1000,
+        system: SYSTEM_PROMPT,
+        messages: [{ role: "user", content: prompt }],
+      }),
+    });
+    if (!res.ok) {
+      const d = await res.json().catch(() => ({}));
+      throw new Error((d as any)?.error?.message || `Error ${res.status}`);
+    }
+    const data = await res.json();
+    return (data as any).content?.map((b: any) => b.text || "").join("") || "";
+  };
+
+  const callOpenRouter = async (prompt: string) => {
+    const res = await fetch("https://openrouter.ai/api/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${apiKey}`,
+        "HTTP-Referer": window.location.origin,
+        "X-Title": "SmartCalc AI",
+      },
+      body: JSON.stringify({
+        model: selectedModel,
+        max_tokens: 1000,
+        temperature: 0.2,
+        messages: [
+          { role: "system", content: SYSTEM_PROMPT },
+          { role: "user", content: prompt },
+        ],
+      }),
+    });
+    if (!res.ok) {
+      const d = await res.json().catch(() => ({}));
+      throw new Error((d as any)?.error?.message || `Error ${res.status}`);
+    }
+    const data = await res.json();
+    return (data as any).choices?.[0]?.message?.content || "";
   };
 
   const handleCalc = async () => {
     if (!query.trim() || !saved) return;
-    setLoading(true); setResult(null); setCalcErr("");
+    setLoading(true);
+    setResult(null);
+    setCalcErr("");
+
     if (isDemo) {
-      await new Promise(r => setTimeout(r, 1100));
+      await new Promise((r) => setTimeout(r, 1100));
       setResult(DEMO_RESULT);
-      setHistory(p => [{ q: query.trim(), r: DEMO_RESULT.result }, ...p].slice(0, 5));
-      setLoading(false); return;
+      setHistory((p) => [{ q: query.trim(), r: DEMO_RESULT.result }, ...p].slice(0, 5));
+      setLoading(false);
+      return;
     }
+
     try {
-      const res = await fetch("https://api.anthropic.com/v1/messages", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "x-api-key": apiKey,
-          "anthropic-version": "2023-06-01",
-          "anthropic-dangerous-direct-browser-access": "true",
-        },
-        body: JSON.stringify({
-          model: "claude-sonnet-4-20250514",
-          max_tokens: 1000,
-          system: SYSTEM_PROMPT,
-          messages: [{ role: "user", content: query.trim() }],
-        }),
-      });
-      if (!res.ok) { const d = await res.json().catch(() => ({})); throw new Error((d as any)?.error?.message || `Error ${res.status}`); }
-      const data = await res.json();
-      const txt = (data as any).content?.map((b: any) => b.text || "").join("") || "";
-      const parsed = JSON.parse(txt.replace(/```json|```/g, "").trim());
-      if (parsed.error) { setCalcErr(parsed.error); }
-      else { setResult(parsed); setHistory(p => [{ q: query.trim(), r: parsed.result }, ...p].slice(0, 5)); }
-    } catch (e) { setCalcErr((e as Error).message || "Something went wrong. Check your API key."); }
+      const txt =
+        provider === "anthropic"
+          ? await callAnthropic(query.trim())
+          : await callOpenRouter(query.trim());
+
+      const cleaned = txt.replace(/```json|```/g, "").trim();
+      const parsed = JSON.parse(cleaned);
+
+      if (parsed.error) {
+        setCalcErr(parsed.error);
+      } else {
+        setResult(parsed);
+        setHistory((p) => [{ q: query.trim(), r: parsed.result }, ...p].slice(0, 5));
+      }
+    } catch (e) {
+      setCalcErr((e as Error).message || "Something went wrong. Check your API key / model.");
+    }
     setLoading(false);
   };
+
+  const providerLabel =
+    provider === "anthropic" ? "Anthropic Claude" : `OpenRouter · ${OPENROUTER_MODELS.find(m => m.id === selectedModel)?.name || selectedModel}`;
 
   return (
     <>
@@ -96,7 +175,6 @@ export default function Home() {
         .app{min-height:100vh;display:flex;flex-direction:column;align-items:center;padding:28px 14px 64px;}
         .wrap{width:100%;max-width:600px;display:flex;flex-direction:column;gap:10px;}
 
-        /* Header */
         .hd{text-align:center;margin-bottom:28px;padding:0 8px;}
         .badge{display:inline-flex;align-items:center;gap:6px;background:var(--amg);border:1px solid rgba(240,165,0,.2);border-radius:20px;padding:4px 13px;margin-bottom:14px;font-family:var(--mono);font-size:10px;color:var(--am);letter-spacing:.08em;text-transform:uppercase;}
         .dot{width:6px;height:6px;background:var(--am);border-radius:50%;animation:p 2s infinite;}
@@ -105,7 +183,6 @@ export default function Home() {
         .hd h1 em{color:var(--am);font-style:normal;}
         .hd p{color:var(--td);font-size:14px;line-height:1.55;}
 
-        /* Card */
         .card{background:var(--s1);border:1px solid var(--b1);border-radius:14px;overflow:hidden;}
         .ch{padding:10px 16px;border-bottom:1px solid var(--b1);display:flex;align-items:center;gap:7px;font-family:var(--mono);font-size:10px;letter-spacing:.08em;text-transform:uppercase;color:var(--tm);}
         .ci{width:6px;height:6px;border-radius:50%;background:var(--tm);flex-shrink:0;}
@@ -113,7 +190,6 @@ export default function Home() {
         .ci.g{background:var(--gr);}
         .ci.r{background:var(--rd);}
 
-        /* Setup */
         .sb{padding:18px 16px;}
         .sq{font-size:14px;color:var(--td);line-height:1.5;margin-bottom:14px;}
         .mg{display:grid;grid-template-columns:1fr 1fr;gap:8px;}
@@ -140,11 +216,16 @@ export default function Home() {
         .lnk{font-family:var(--mono);font-size:11px;color:var(--am);text-decoration:none;}
         .lnk:hover{text-decoration:underline;}
 
-        /* Status bar */
-        .stbar{padding:10px 16px;display:flex;align-items:center;gap:8px;}
+        .prov{display:flex;gap:8px;margin-bottom:12px;}
+        .prov button{flex:1;border:1.5px solid var(--b2);border-radius:9px;padding:10px;background:var(--s2);color:var(--td);font-size:12px;font-weight:600;cursor:pointer;transition:all .15s;}
+        .prov button.on{border-color:var(--am);background:var(--amg);color:var(--am);}
+
+        .sel{width:100%;background:var(--bg);border:1px solid var(--b2);border-radius:9px;padding:10px 12px;font-family:var(--mono);font-size:12px;color:var(--tx);outline:none;margin-bottom:8px;}
+        .sel:focus{border-color:var(--am);}
+
+        .stbar{padding:10px 16px;display:flex;align-items:center;gap:8px;flex-wrap:wrap;}
         .dtag{font-family:var(--mono);font-size:10px;background:var(--amg);border:1px solid rgba(240,165,0,.2);border-radius:5px;padding:2px 8px;color:var(--am);letter-spacing:.05em;}
 
-        /* Input */
         .ib2{padding:16px;}
         .qb{position:relative;}
         .qt{width:100%;background:var(--bg);border:1.5px solid var(--b2);border-radius:11px;padding:13px 52px 13px 15px;font-family:'Outfit',sans-serif;font-size:15px;color:var(--tx);resize:none;outline:none;min-height:70px;transition:border-color .2s,box-shadow .2s;line-height:1.5;}
@@ -157,13 +238,11 @@ export default function Home() {
         .ck{background:var(--s2);border:1px solid var(--b1);border-radius:7px;padding:5px 10px;font-family:var(--mono);font-size:11px;color:var(--td);cursor:pointer;transition:all .15s;}
         .ck:hover{border-color:var(--am);color:var(--am);background:var(--amg);}
 
-        /* Loading */
         .lb{padding:26px;display:flex;flex-direction:column;align-items:center;gap:11px;}
         .sp{width:34px;height:34px;border:2px solid var(--b2);border-top-color:var(--am);border-radius:50%;animation:s .7s linear infinite;}
         @keyframes s{to{transform:rotate(360deg);}}
         .lt{font-family:var(--mono);font-size:12px;color:var(--tm);letter-spacing:.04em;}
 
-        /* Result */
         .rc{animation:up .32s ease;}
         @keyframes up{from{opacity:0;transform:translateY(12px);}to{opacity:1;transform:translateY(0);}}
         .rt{padding:18px 16px;border-bottom:1px solid var(--b1);}
@@ -180,10 +259,8 @@ export default function Home() {
         .sd{font-size:12px;color:var(--td);line-height:1.55;}
         .se{display:inline-block;margin-top:5px;background:var(--bg);border:1px solid var(--b2);border-radius:5px;padding:3px 9px;font-family:var(--mono);font-size:11px;color:var(--am2);}
 
-        /* Calc Error */
         .ce{margin:0 16px 16px;padding:11px 13px;background:rgba(248,113,113,.07);border:1px solid rgba(248,113,113,.2);border-radius:9px;font-family:var(--mono);font-size:12px;color:var(--rd);}
 
-        /* History */
         .hb{padding:12px 14px;}
         .hi{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:9px 11px;background:var(--bg);border:1px solid var(--b1);border-radius:9px;margin-bottom:6px;cursor:pointer;transition:border-color .15s;}
         .hi:last-child{margin-bottom:0;}
@@ -191,7 +268,6 @@ export default function Home() {
         .hq{font-size:12px;color:var(--td);flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
         .hr{font-family:var(--mono);font-size:12px;color:var(--am);}
 
-        /* Footer */
         .ft{margin-top:42px;text-align:center;font-family:var(--mono);font-size:10px;color:var(--tm);letter-spacing:.04em;line-height:2.2;}
         .ft a{color:var(--am);text-decoration:none;}
         .ft a:hover{text-decoration:underline;}
@@ -199,16 +275,13 @@ export default function Home() {
       `}</style>
 
       <div className="app">
-        {/* Header */}
         <div className="hd">
-          <div className="badge"><span className="dot"/>Open Source · AI Powered</div>
+          <div className="badge"><span className="dot"/>Open Source · Multi-Model</div>
           <h1>Smart<em>Calc</em> AI</h1>
           <p>Ask any math problem in plain language — get instant answers with step-by-step breakdown</p>
         </div>
 
         <div className="wrap">
-
-          {/* ── SETUP (hidden once saved) ── */}
           {!saved && (
             <div className="card">
               <div className="ch"><span className="ci a"/>Setup · Choose Mode</div>
@@ -223,7 +296,7 @@ export default function Home() {
                   <button className={`mb${mode==="real"?" on":""}`} onClick={() => { setMode("real"); setSetupErr(""); }}>
                     <div className="mi">🔑</div>
                     <div className="mn">Real Mode</div>
-                    <div className="md">Use your Anthropic API key for live AI calculations.</div>
+                    <div className="md">Use Anthropic or OpenRouter (free models available).</div>
                   </button>
                 </div>
 
@@ -236,74 +309,129 @@ export default function Home() {
 
                 {mode === "real" && (
                   <div className="sf">
+                    <div className="prov">
+                      <button className={provider==="openrouter"?"on":""} onClick={() => setProvider("openrouter")}>OpenRouter</button>
+                      <button className={provider==="anthropic"?"on":""} onClick={() => setProvider("anthropic")}>Anthropic</button>
+                    </div>
+
+                    {provider === "openrouter" && (
+                      <select className="sel" value={selectedModel} onChange={(e) => setSelectedModel(e.target.value)}>
+                        {OPENROUTER_MODELS.map((m) => (
+                          <option key={m.id} value={m.id}>{m.name}</option>
+                        ))}
+                      </select>
+                    )}
+
                     <div className="ar">
-                      <input className="ai" type={showKey?"text":"password"} placeholder="sk-ant-api03-..." value={keyInput} onChange={e=>setKeyInput(e.target.value)} onKeyDown={e=>e.key==="Enter"&&handleSave()}/>
-                      <button className="ib" onClick={()=>setShowKey(v=>!v)}>
-                        {showKey
-                          ? <svg width="14" height="14" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path d="M17.94 17.94A10 10 0 0112 20C5 20 1 12 1 12a18 18 0 015.06-5.94M9.9 4.24A9 9 0 0112 4c7 0 11 8 11 8a18 18 0 01-2.16 3.19m-6.72-1.07a3 3 0 11-4.24-4.24"/><line x1="1" y1="1" x2="23" y2="23"/></svg>
-                          : <svg width="14" height="14" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
-                        }
+                      <input
+                        className="ai"
+                        type={showKey ? "text" : "password"}
+                        placeholder={provider === "openrouter" ? "sk-or-v1-..." : "sk-ant-api03-..."}
+                        value={keyInput}
+                        onChange={(e) => setKeyInput(e.target.value)}
+                        onKeyDown={(e) => e.key === "Enter" && handleSave()}
+                      />
+                      <button className="ib" onClick={() => setShowKey((v) => !v)}>
+                        {showKey ? (
+                          <svg width="14" height="14" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path d="M17.94 17.94A10 10 0 0112 20C5 20 1 12 1 12a18 18 0 015.06-5.94M9.9 4.24A9 9 0 0112 4c7 0 11 8 11 8a18 18 0 01-2.16 3.19m-6.72-1.07a3 3 0 11-4.24-4.24"/><line x1="1" y1="1" x2="23" y2="23"/></svg>
+                        ) : (
+                          <svg width="14" height="14" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
+                        )}
                       </button>
                       <button className="pb" onClick={handleSave}>Save</button>
                     </div>
                     {setupErr && <div className="nt er">{setupErr}</div>}
-                    <div className="nt wn">Key stored in session only — never sent anywhere except Anthropic directly.</div>
-                    <a className="lnk" href="https://console.anthropic.com" target="_blank" rel="noopener">→ Get your API key from Anthropic Console</a>
+                    <div className="nt wn">Key stored in session only — never sent to any server except the AI provider.</div>
+                    <a
+                      className="lnk"
+                      href={provider === "openrouter" ? "https://openrouter.ai/keys" : "https://console.anthropic.com"}
+                      target="_blank"
+                      rel="noopener"
+                    >
+                      → Get your API key from {provider === "openrouter" ? "OpenRouter" : "Anthropic"}
+                    </a>
                   </div>
                 )}
               </div>
             </div>
           )}
 
-          {/* ── STATUS BAR (after saved) ── */}
           {saved && (
             <div className="card">
               <div className="stbar">
-                <span className="ci g"/>
-                <span style={{fontFamily:"var(--mono)",fontSize:11,color:"#5a5a5a",letterSpacing:".05em",textTransform:"uppercase"}}>
-                  {isDemo ? "Demo Mode" : "Connected · Real Mode"}
+                <span className="ci g" />
+                <span style={{ fontFamily: "var(--mono)", fontSize: 11, color: "#5a5a5a", letterSpacing: ".05em", textTransform: "uppercase" }}>
+                  {isDemo ? "Demo Mode" : providerLabel}
                 </span>
                 {isDemo && <span className="dtag">DEMO</span>}
+                {!isDemo && provider === "openrouter" && <span className="dtag">FREE MODELS</span>}
               </div>
             </div>
           )}
 
-          {/* ── CALCULATOR INPUT ── */}
           <div className="card">
             <div className="ch"><span className="ci a"/>Your Problem</div>
             <div className="ib2">
               <div className="qb">
-                <textarea ref={ref} className="qt" placeholder="e.g. What is 15% of 8,750?  or  Solve x² - 5x + 6 = 0" value={query} onChange={e=>setQuery(e.target.value)} onKeyDown={e=>{if(e.key==="Enter"&&!e.shiftKey){e.preventDefault();handleCalc();}}} rows={3}/>
-                <button className="gb" onClick={handleCalc} disabled={loading||!query.trim()||!saved}>
-                  {loading
-                    ? <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="#000" strokeWidth="2.5"><circle cx="12" cy="12" r="10" strokeOpacity=".2"/><path d="M12 2a10 10 0 010 20" strokeLinecap="round"/></svg>
-                    : <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="#000" strokeWidth="2.5" strokeLinecap="round"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>
-                  }
+                <textarea
+                  ref={ref}
+                  className="qt"
+                  placeholder="e.g. What is 15% of 8,750?  or  Solve x² - 5x + 6 = 0"
+                  value={query}
+                  onChange={(e) => setQuery(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter" && !e.shiftKey) {
+                      e.preventDefault();
+                      handleCalc();
+                    }
+                  }}
+                  rows={3}
+                />
+                <button className="gb" onClick={handleCalc} disabled={loading || !query.trim() || !saved}>
+                  {loading ? (
+                    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="#000" strokeWidth="2.5"><circle cx="12" cy="12" r="10" strokeOpacity=".2"/><path d="M12 2a10 10 0 010 20" strokeLinecap="round"/></svg>
+                  ) : (
+                    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="#000" strokeWidth="2.5" strokeLinecap="round"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>
+                  )}
                 </button>
               </div>
-              {!saved && <div style={{fontFamily:"var(--mono)",fontSize:11,color:"var(--tm)",marginTop:8}}>Complete setup above to start calculating</div>}
+              {!saved && (
+                <div style={{ fontFamily: "var(--mono)", fontSize: 11, color: "var(--tm)", marginTop: 8 }}>
+                  Complete setup above to start calculating
+                </div>
+              )}
               <div className="cs">
-                {EXAMPLES.map((ex,i)=>(
-                  <button key={i} className="ck" onClick={()=>setQuery(ex)}>{ex}</button>
+                {EXAMPLES.map((ex, i) => (
+                  <button key={i} className="ck" onClick={() => setQuery(ex)}>
+                    {ex}
+                  </button>
                 ))}
               </div>
             </div>
           </div>
 
-          {/* ── LOADING ── */}
           {loading && (
             <div className="card">
-              <div className="lb"><div className="sp"/><div className="lt">Calculating step by step...</div></div>
+              <div className="lb">
+                <div className="sp" />
+                <div className="lt">Calculating step by step...</div>
+              </div>
             </div>
           )}
 
-          {/* ── CALC ERROR ── */}
-          {calcErr && !loading && <div className="card rc"><div style={{height:12}}/><div className="ce">✗ {calcErr}</div></div>}
+          {calcErr && !loading && (
+            <div className="card rc">
+              <div style={{ height: 12 }} />
+              <div className="ce">✗ {calcErr}</div>
+            </div>
+          )}
 
-          {/* ── RESULT ── */}
           {result && !loading && (
             <div className="card rc">
-              <div className="ch"><span className="ci g"/>Result {isDemo&&<span className="dtag">DEMO</span>}</div>
+              <div className="ch">
+                <span className="ci g" />
+                Result {isDemo && <span className="dtag">DEMO</span>}
+              </div>
               <div className="rt">
                 <div className="rl">Answer</div>
                 <div className="rv">{result.result}</div>
@@ -313,13 +441,13 @@ export default function Home() {
                 <div className="sw">
                   <div className="sl">Step-by-Step Breakdown</div>
                   <div className="ss">
-                    {result.steps.map((s: any,i: number)=>(
+                    {result.steps.map((s: any, i: number) => (
                       <div key={i} className="si">
-                        <div className="sn">{s.step||i+1}</div>
+                        <div className="sn">{s.step || i + 1}</div>
                         <div className="sc">
                           <div className="sk">{s.label}</div>
                           <div className="sd">{s.detail}</div>
-                          {s.expression&&s.expression.trim()&&<div className="se">{s.expression}</div>}
+                          {s.expression && s.expression.trim() && <div className="se">{s.expression}</div>}
                         </div>
                       </div>
                     ))}
@@ -329,13 +457,12 @@ export default function Home() {
             </div>
           )}
 
-          {/* ── HISTORY ── */}
           {history.length > 0 && (
             <div className="card">
               <div className="ch"><span className="ci"/>Recent</div>
               <div className="hb">
-                {history.map((h,i)=>(
-                  <div key={i} className="hi" onClick={()=>setQuery(h.q)}>
+                {history.map((h, i) => (
+                  <div key={i} className="hi" onClick={() => setQuery(h.q)}>
                     <div className="hq">{h.q}</div>
                     <div className="hr">= {h.r}</div>
                   </div>
@@ -345,15 +472,17 @@ export default function Home() {
           )}
         </div>
 
-        {/* Footer */}
         <div className="ft">
           Open Source · MIT License ·{" "}
-          <a href="https://github.com/princeruhulofficial/calculator-ai" target="_blank" rel="noopener">View on GitHub</a>
-          {" "}·{" "}
-          <a href="https://console.anthropic.com" target="_blank" rel="noopener">Get API Key</a>
-          <br/>
+          <a href="https://github.com/princeruhulofficial/calculator-ai" target="_blank" rel="noopener">
+            View on GitHub
+          </a>
+          {" "}· Supports Anthropic + OpenRouter (free models)
+          <br />
           Your key stays in your browser session only — never stored anywhere
-          <div className="ft-by">Crafted with ♥ by <a href="https://github.com/princeruhulofficial">Prince Ruhul</a> · Founder, Prevalid</div>
+          <div className="ft-by">
+            Crafted with ♥ by <a href="https://github.com/princeruhulofficial">Prince Ruhul</a> · Founder, Prevalid
+          </div>
         </div>
       </div>
     </>
